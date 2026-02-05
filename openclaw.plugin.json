@@ -1,0 +1,11 @@
+{
+    "id": "serverchan-bot",
+    "channels": [
+        "serverchan-bot"
+    ],
+    "configSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+    }
+}
