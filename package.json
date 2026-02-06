@@ -1,7 +1,8 @@
 {
-    "name": "@openclaw/serverchan-bot",
+    "name": "openclaw-serverchan-bot",
     "version": "2026.2.2",
     "description": "OpenClaw Server酱³ Bot channel plugin",
+    "license": "MIT",
     "type": "module",
     "devDependencies": {
         "openclaw": "workspace:*"
@@ -10,5 +11,8 @@
         "extensions": [
             "./index.ts"
         ]
+    },
+    "publishConfig": {
+        "access": "public"
     }
 }

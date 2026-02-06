@@ -1,4 +1,4 @@
-# @openclaw/serverchan-bot
+# openclaw-serverchan-bot
 
 Server酱³ Bot channel plugin for OpenClaw - 支持双向消息通信的 Server酱³ Bot 渠道插件。
 
@@ -13,7 +13,7 @@ Server酱³ Bot channel plugin for OpenClaw - 支持双向消息通信的 Server
 ### 从 NPM 安装（推荐）
 
 ```bash
-openclaw plugins install @openclaw/serverchan-bot
+openclaw plugins install openclaw-serverchan-bot
 ```
 
 ### 从本地安装
