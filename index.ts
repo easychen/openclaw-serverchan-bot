@@ -4,7 +4,7 @@ import { handleServerChanBotWebhookRequest, serverChanBotPlugin } from "./src/ch
 import { setServerChanBotRuntime } from "./src/runtime.js";
 
 const plugin = {
-    id: "serverchan-bot",
+    id: "openclaw-serverchan-bot",
     name: "Server酱³ Bot",
     description: "Server酱³ Bot channel plugin for bidirectional messaging",
     configSchema: emptyPluginConfigSchema(),
