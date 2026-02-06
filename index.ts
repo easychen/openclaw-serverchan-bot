@@ -1,6 +1,6 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
-import { serverChanBotPlugin } from "./src/channel.js";
+import { handleServerChanBotWebhookRequest, serverChanBotPlugin } from "./src/channel.js";
 import { setServerChanBotRuntime } from "./src/runtime.js";
 
 const plugin = {
@@ -11,6 +11,7 @@ const plugin = {
     register(api: OpenClawPluginApi) {
         setServerChanBotRuntime(api.runtime);
         api.registerChannel({ plugin: serverChanBotPlugin });
+        api.registerHttpHandler(handleServerChanBotWebhookRequest);
     },
 };
 

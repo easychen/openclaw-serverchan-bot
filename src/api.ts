@@ -19,7 +19,16 @@ export type ServerChanBotInfo = {
 
 export type ServerChanMessage = {
     message_id: number;
-    chat_id: number;
+    chat_id?: number;
+    chat?: {
+        id: number;
+        type?: string;
+    };
+    from?: {
+        id: number;
+        is_bot?: boolean;
+        first_name?: string;
+    };
     text: string;
     date?: number;
 };
@@ -181,8 +190,15 @@ export function parseWebhookPayload(body: unknown): ServerChanUpdate | null {
 
     const msg = message as Record<string, unknown>;
     const messageId = msg.message_id;
-    const chatId = msg.chat_id;
     const text = msg.text;
+    const rawChatId = msg.chat_id;
+    const chat = msg.chat;
+    const chatId =
+        typeof rawChatId === "number"
+            ? rawChatId
+            : chat && typeof chat === "object"
+                ? (chat as { id?: unknown }).id
+                : undefined;
 
     if (typeof messageId !== "number" || typeof chatId !== "number" || typeof text !== "string") {
         return null;
@@ -193,6 +209,7 @@ export function parseWebhookPayload(body: unknown): ServerChanUpdate | null {
         message: {
             message_id: messageId,
             chat_id: chatId,
+            chat: chat && typeof chat === "object" ? (chat as { id: number; type?: string }) : undefined,
             text,
             date: typeof msg.date === "number" ? msg.date : undefined,
         },

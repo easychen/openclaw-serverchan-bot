@@ -1,7 +1,9 @@
+import type { IncomingMessage, ServerResponse } from "node:http";
 import type {
     ChannelAccountSnapshot,
     ChannelPlugin,
     ChannelStatusIssue,
+    OpenClawConfig,
 } from "openclaw/plugin-sdk";
 import { DEFAULT_ACCOUNT_ID, buildChannelConfigSchema } from "openclaw/plugin-sdk";
 import { ServerChanBotConfigSchema } from "./config-schema.js";
@@ -11,6 +13,8 @@ import {
     serverChanBotGetUpdates,
     type ServerChanBotInfo,
     type ServerChanUpdate,
+    parseWebhookPayload,
+    verifyWebhookSecret,
 } from "./api.js";
 import { getServerChanBotRuntime } from "./runtime.js";
 
@@ -62,6 +66,305 @@ const meta = {
 
 const normalizeAllowEntry = (entry: string) =>
     entry.replace(/^serverchan(-bot)?:/i, "").trim();
+
+type ServerChanBotLog = {
+    info?: (message: string) => void;
+    error?: (message: string) => void;
+    debug?: (message: string) => void;
+};
+
+type WebhookTarget = {
+    account: ResolvedServerChanBotAccount;
+    config: OpenClawConfig;
+    log?: ServerChanBotLog;
+    botToken: string;
+    path: string;
+    secret?: string;
+    statusSink?: (patch: { lastInboundAt?: number; lastOutboundAt?: number }) => void;
+};
+
+const webhookTargets = new Map<string, WebhookTarget[]>();
+
+function normalizeWebhookPath(raw: string): string {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+        return "/";
+    }
+    const withSlash = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+    if (withSlash.length > 1 && withSlash.endsWith("/")) {
+        return withSlash.slice(0, -1);
+    }
+    return withSlash;
+}
+
+function resolveWebhookPath(webhookPath?: string, webhookUrl?: string): string | null {
+    const trimmedPath = webhookPath?.trim();
+    if (trimmedPath) {
+        return normalizeWebhookPath(trimmedPath);
+    }
+    if (webhookUrl?.trim()) {
+        try {
+            const parsed = new URL(webhookUrl);
+            return normalizeWebhookPath(parsed.pathname || "/");
+        } catch {
+            return null;
+        }
+    }
+    return "/serverchan-bot";
+}
+
+async function readJsonBody(req: IncomingMessage, maxBytes: number) {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    return await new Promise<{ ok: boolean; value?: unknown; error?: string }>((resolve) => {
+        let resolved = false;
+        const doResolve = (value: { ok: boolean; value?: unknown; error?: string }) => {
+            if (resolved) {
+                return;
+            }
+            resolved = true;
+            req.removeAllListeners();
+            resolve(value);
+        };
+        req.on("data", (chunk: Buffer) => {
+            total += chunk.length;
+            if (total > maxBytes) {
+                doResolve({ ok: false, error: "payload too large" });
+                req.destroy();
+                return;
+            }
+            chunks.push(chunk);
+        });
+        req.on("end", () => {
+            try {
+                const raw = Buffer.concat(chunks).toString("utf8");
+                if (!raw.trim()) {
+                    doResolve({ ok: false, error: "empty payload" });
+                    return;
+                }
+                doResolve({ ok: true, value: JSON.parse(raw) as unknown });
+            } catch (err) {
+                doResolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
+            }
+        });
+        req.on("error", (err) => {
+            doResolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
+        });
+    });
+}
+
+function buildWebhookUrlFromConfig(params: { cfg: OpenClawConfig; path: string }): string {
+    const gateway = params.cfg.gateway ?? {};
+    const port =
+        typeof gateway.port === "number" && gateway.port > 0 ? gateway.port : 18789;
+    const customHost =
+        typeof gateway.customBindHost === "string" && gateway.customBindHost.trim()
+            ? gateway.customBindHost.trim()
+            : undefined;
+    const bind = typeof gateway.bind === "string" ? gateway.bind : "loopback";
+    const host = customHost ?? (bind === "loopback" ? "127.0.0.1" : "localhost");
+    const scheme = gateway.tls?.enabled ? "https" : "http";
+    return `${scheme}://${host}:${port}${params.path}`;
+}
+
+function selectWebhookTarget(
+    targets: WebhookTarget[],
+    headers: Record<string, string | string[] | undefined>,
+): WebhookTarget | null {
+    if (targets.length === 1) {
+        const only = targets[0];
+        if (!only.secret) {
+            return only;
+        }
+        return verifyWebhookSecret(headers, only.secret) ? only : null;
+    }
+    const secretTarget = targets.find((target) => {
+        if (!target.secret) {
+            return false;
+        }
+        return verifyWebhookSecret(headers, target.secret);
+    });
+    if (secretTarget) {
+        return secretTarget;
+    }
+    const withoutSecret = targets.filter((target) => !target.secret);
+    if (withoutSecret.length === 1) {
+        return withoutSecret[0];
+    }
+    return null;
+}
+
+export function registerServerChanBotWebhookTarget(target: WebhookTarget): () => void {
+    const key = normalizeWebhookPath(target.path);
+    const normalizedTarget = { ...target, path: key };
+    const existing = webhookTargets.get(key) ?? [];
+    const next = [...existing, normalizedTarget];
+    webhookTargets.set(key, next);
+    return () => {
+        const updated = (webhookTargets.get(key) ?? []).filter((entry) => entry !== normalizedTarget);
+        if (updated.length > 0) {
+            webhookTargets.set(key, updated);
+        } else {
+            webhookTargets.delete(key);
+        }
+    };
+}
+
+async function processServerChanBotUpdate(params: {
+    update: ServerChanUpdate;
+    account: ResolvedServerChanBotAccount;
+    cfg: OpenClawConfig;
+    botToken: string;
+    log?: ServerChanBotLog;
+    statusSink?: (patch: { lastInboundAt?: number; lastOutboundAt?: number }) => void;
+}): Promise<void> {
+    const { update, account, cfg, botToken, log, statusSink } = params;
+    const updateChatId =
+        update.message.chat?.id ??
+        update.message.chat_id ??
+        update.message.from?.id;
+    if (updateChatId === undefined || updateChatId === null) {
+        log?.error?.(`[${account.accountId}] update missing chat id: ${JSON.stringify(update)}`);
+        return;
+    }
+    const chatId = String(updateChatId);
+    const text = update.message.text || "";
+    const messageId = String(update.message.message_id);
+
+    log?.info?.(
+        `[${account.accountId}] received message from ${chatId}: ${text.substring(0, 50)}...`,
+    );
+
+    statusSink?.({
+        lastInboundAt: Date.now(),
+    });
+
+    const msgContext = {
+        Provider: "serverchan-bot",
+        Surface: "serverchan-bot",
+        Channel: "serverchan-bot",
+        From: chatId,
+        To: chatId,
+        Body: text,
+        RawBody: text,
+        BodyForCommands: text,
+        BodyForAgent: text,
+        ChatType: "direct" as const,
+        AccountId: account.accountId,
+        MessageSid: messageId,
+        MessageSidFull: `serverchan-bot:${messageId}`,
+        SessionKey: `serverchan-bot:${chatId}`,
+        SenderId: chatId,
+        Timestamp: update.message.date ? update.message.date * 1000 : Date.now(),
+    };
+
+    try {
+        const pluginRuntime = getServerChanBotRuntime();
+        const { queuedFinal } =
+            await pluginRuntime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
+                ctx: msgContext,
+                cfg,
+                dispatcherOptions: {
+                    deliver: async (payload: { text?: string }) => {
+                        const replyText = payload.text || "";
+                        if (!replyText.trim()) {
+                            return;
+                        }
+
+                        const configuredChatId = account.config.chatId?.trim();
+                        const targetChatId = configuredChatId || chatId;
+
+                        try {
+                            const result = await serverChanBotSendMessage(
+                                botToken,
+                                targetChatId,
+                                replyText,
+                            );
+
+                            if (!result.ok) {
+                                log?.error?.(
+                                    `[${account.accountId}] failed to send reply: ${result.error}`,
+                                );
+                            } else {
+                                statusSink?.({
+                                    lastOutboundAt: Date.now(),
+                                });
+                            }
+                        } catch (sendErr) {
+                            log?.error?.(`[${account.accountId}] send error: ${String(sendErr)}`);
+                        }
+                    },
+                    onError: (err: unknown, info: { kind: string }) => {
+                        log?.error?.(
+                            `[${account.accountId}] ${info.kind} reply failed: ${String(err)}`,
+                        );
+                    },
+                },
+            });
+
+        if (!queuedFinal) {
+            log?.debug?.(`[${account.accountId}] no response generated for message from ${chatId}`);
+        }
+    } catch (dispatchErr) {
+        log?.error?.(`[${account.accountId}] dispatch error: ${String(dispatchErr)}`);
+    }
+}
+
+export async function handleServerChanBotWebhookRequest(
+    req: IncomingMessage,
+    res: ServerResponse,
+): Promise<boolean> {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const path = normalizeWebhookPath(url.pathname);
+    const targets = webhookTargets.get(path);
+    if (!targets || targets.length === 0) {
+        return false;
+    }
+
+    if (req.method !== "POST") {
+        res.statusCode = 405;
+        res.setHeader("Allow", "POST");
+        res.end("Method Not Allowed");
+        return true;
+    }
+
+    const selected = selectWebhookTarget(targets, req.headers);
+    if (!selected) {
+        res.statusCode = 401;
+        res.end("unauthorized");
+        return true;
+    }
+
+    const body = await readJsonBody(req, 1024 * 1024);
+    if (!body.ok) {
+        res.statusCode = body.error === "payload too large" ? 413 : 400;
+        res.end(body.error ?? "invalid payload");
+        return true;
+    }
+
+    const update = parseWebhookPayload(body.value);
+    if (!update) {
+        res.statusCode = 400;
+        res.end("invalid payload");
+        return true;
+    }
+
+    selected.statusSink?.({ lastInboundAt: Date.now() });
+    processServerChanBotUpdate({
+        update,
+        account: selected.account,
+        cfg: selected.config,
+        botToken: selected.botToken,
+        log: selected.log,
+        statusSink: selected.statusSink,
+    }).catch((err) => {
+        selected.log?.error?.(`[${selected.account.accountId}] webhook error: ${String(err)}`);
+    });
+
+    res.statusCode = 200;
+    res.end("ok");
+    return true;
+}
 
 /**
  * Resolve account configuration from OpenClaw config
@@ -130,8 +433,7 @@ function resolveServerChanBotAccount(params: {
                 (section.allowFrom as Array<string | number> | undefined),
             pollingEnabled:
                 (accountConfig.pollingEnabled as boolean | undefined) ??
-                (section.pollingEnabled as boolean | undefined) ??
-                true, // Default to polling enabled
+                (section.pollingEnabled as boolean | undefined),
             pollingIntervalMs:
                 (accountConfig.pollingIntervalMs as number | undefined) ??
                 (section.pollingIntervalMs as number | undefined) ??
@@ -411,6 +713,9 @@ export const serverChanBotPlugin: ChannelPlugin<ResolvedServerChanBotAccount, Se
         startAccount: async (ctx) => {
             const { account, log, setStatus, abortSignal, cfg, runtime } = ctx;
             const { botToken, pollingEnabled, pollingIntervalMs } = account.config;
+            const typedConfig = cfg as OpenClawConfig;
+            const statusSink = (patch: { lastInboundAt?: number; lastOutboundAt?: number }) =>
+                setStatus({ accountId: account.accountId, ...patch });
 
             if (!botToken) {
                 throw new Error("Server酱³ Bot token not configured");
@@ -436,8 +741,45 @@ export const serverChanBotPlugin: ChannelPlugin<ResolvedServerChanBotAccount, Se
                 lastStartAt: Date.now(),
             });
 
+            const hasWebhookConfig =
+                Boolean(account.config.webhookUrl?.trim()) ||
+                Boolean(account.config.webhookPath?.trim()) ||
+                Boolean(account.config.webhookSecret?.trim());
+
+            // Mode selection:
+            // - If pollingEnabled is explicitly set, it wins.
+            // - Otherwise, fall back to webhook when webhook config exists; else polling.
+            const shouldPoll = typeof pollingEnabled === "boolean" ? pollingEnabled : !hasWebhookConfig;
+            const wantsWebhook = typeof pollingEnabled === "boolean" ? !pollingEnabled : hasWebhookConfig;
+
+            const webhookPath = wantsWebhook
+                ? resolveWebhookPath(account.config.webhookPath, account.config.webhookUrl)
+                : null;
+            if (wantsWebhook && webhookPath) {
+                const webhookSecret = account.config.webhookSecret?.trim() || undefined;
+                const unregister = registerServerChanBotWebhookTarget({
+                    account,
+                    config: typedConfig,
+                    log,
+                    botToken,
+                    path: webhookPath,
+                    secret: webhookSecret,
+                    statusSink,
+                });
+                abortSignal.addEventListener("abort", unregister, { once: true });
+                const webhookUrl =
+                    account.config.webhookUrl?.trim() ??
+                    buildWebhookUrlFromConfig({ cfg: typedConfig, path: webhookPath });
+                log?.info?.(`[${account.accountId}] webhook url: ${webhookUrl}`);
+                if (!webhookSecret) {
+                    log?.info?.(`[${account.accountId}] webhook secret not configured`);
+                }
+            } else if (wantsWebhook && !webhookPath) {
+                log?.error?.(`[${account.accountId}] webhook path could not be derived`);
+            }
+
             // Only start polling if enabled
-            if (!pollingEnabled) {
+            if (!shouldPoll) {
                 log?.info(`[${account.accountId}] polling disabled, waiting for webhook`);
                 return;
             }
@@ -451,86 +793,14 @@ export const serverChanBotPlugin: ChannelPlugin<ResolvedServerChanBotAccount, Se
                     abortSignal,
                     intervalMs: pollingIntervalMs,
                     onUpdate: async (update) => {
-                        const chatId = String(update.message.chat_id);
-                        const text = update.message.text || "";
-                        const messageId = String(update.message.message_id);
-
-                        log?.info?.(
-                            `[${account.accountId}] received message from ${chatId}: ${text.substring(0, 50)}...`,
-                        );
-
-                        // Record inbound activity
-                        setStatus({
-                            accountId: account.accountId,
-                            lastInboundAt: Date.now(),
+                        await processServerChanBotUpdate({
+                            update,
+                            account,
+                            cfg: typedConfig,
+                            botToken,
+                            log,
+                            statusSink,
                         });
-
-                        // Build message context for OpenClaw
-                        const msgContext = {
-                            Provider: "serverchan-bot",
-                            Surface: "serverchan-bot",
-                            Channel: "serverchan-bot",
-                            From: chatId,
-                            To: chatId,
-                            Body: text,
-                            RawBody: text,
-                            BodyForCommands: text,
-                            BodyForAgent: text,
-                            ChatType: "direct" as const,
-                            AccountId: account.accountId,
-                            MessageSid: messageId,
-                            MessageSidFull: `serverchan-bot:${messageId}`,
-                            SessionKey: `serverchan-bot:${chatId}`,
-                            SenderId: chatId,
-                            Timestamp: update.message.date ? update.message.date * 1000 : Date.now(),
-                        };
-
-                        try {
-                            const pluginRuntime = getServerChanBotRuntime();
-
-                            // Dispatch to auto-reply system for AI response
-                            const { queuedFinal } = await pluginRuntime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
-                                ctx: msgContext,
-                                cfg,
-                                dispatcherOptions: {
-                                    deliver: async (payload) => {
-                                        // Send reply back to the user
-                                        const replyText = payload.text || "";
-                                        if (!replyText.trim()) {
-                                            return;
-                                        }
-
-                                        try {
-                                            const result = await serverChanBotSendMessage(
-                                                botToken,
-                                                chatId,
-                                                replyText,
-                                            );
-
-                                            if (!result.ok) {
-                                                log?.error?.(`[${account.accountId}] failed to send reply: ${result.error}`);
-                                            } else {
-                                                setStatus({
-                                                    accountId: account.accountId,
-                                                    lastOutboundAt: Date.now(),
-                                                });
-                                            }
-                                        } catch (sendErr) {
-                                            log?.error?.(`[${account.accountId}] send error: ${String(sendErr)}`);
-                                        }
-                                    },
-                                    onError: (err, info) => {
-                                        log?.error?.(`[${account.accountId}] ${info.kind} reply failed: ${String(err)}`);
-                                    },
-                                },
-                            });
-
-                            if (!queuedFinal) {
-                                log?.debug?.(`[${account.accountId}] no response generated for message from ${chatId}`);
-                            }
-                        } catch (dispatchErr) {
-                            log?.error?.(`[${account.accountId}] dispatch error: ${String(dispatchErr)}`);
-                        }
                     },
                 });
             } catch (err) {
