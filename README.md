@@ -47,8 +47,6 @@ openclaw plugins install ./extensions/serverchan-bot
 }
 ```
 
-> **如何获取 chat_id？** 
-> 在 Server酱³ App 中向 Bot 发送任意消息，查看 OpenClaw 日志即可看到你的 chat_id。
 
 ### 完整配置选项
 
