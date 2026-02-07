@@ -88,22 +88,6 @@ openclaw plugins install ./extensions/serverchan-bot
 }
 ```
 
-### 使用场景说明
-
-| 场景 | chat_id 来源 | 说明 |
-|------|-------------|------|
-| **双向对话** | 自动获取 | 用户先发消息，AI 回复时自动使用入站消息的 chat_id |
-| **主动推送** | 配置文件 | OpenClaw 主动推送通知，必须配置 chat_id |
-
-
-### 使用环境变量
-
-也可以通过环境变量配置 Bot Token：
-
-```bash
-export SERVERCHAN_BOT_TOKEN="your-bot-token-here"
-```
-
 ## 使用方法
 
 ### 1. 启动 Gateway
