@@ -24,9 +24,9 @@ openclaw plugins install ./extensions/serverchan-bot
 
 ## 获取 Bot Token
 
-1. 访问 [Server酱³ 控制台](https://sc3.ft07.com/) 登录账号
+1. 访问 [Server酱³ 控制台](https://sc3.ft07.com/bot) 登录账号
 2. 创建一个新的 Bot 或使用已有的 Bot
-3. 复制 Bot Token
+3. 复制 Bot Token 和 UID (作为 chat_id )
 
 ## 配置
 

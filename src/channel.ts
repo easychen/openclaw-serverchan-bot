@@ -67,6 +67,10 @@ const meta = {
 const normalizeAllowEntry = (entry: string) =>
     entry.replace(/^serverchan(-bot)?:/i, "").trim();
 
+const channelConfigSchema = {
+    toJSONSchema: () => buildChannelConfigSchema(ServerChanBotConfigSchema),
+};
+
 type ServerChanBotLog = {
     info?: (message: string) => void;
     error?: (message: string) => void;
@@ -564,7 +568,7 @@ export const serverChanBotPlugin: ChannelPlugin<ResolvedServerChanBotAccount, Se
         blockStreaming: true,
     },
     reload: { configPrefixes: ["channels.serverchan-bot"] },
-    configSchema: buildChannelConfigSchema(ServerChanBotConfigSchema),
+    configSchema: channelConfigSchema,
     config: {
         listAccountIds: (cfg) => listServerChanBotAccountIds(cfg),
         resolveAccount: (cfg, accountId) => resolveServerChanBotAccount({ cfg, accountId }),
