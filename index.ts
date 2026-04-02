@@ -1,4 +1,4 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/core";
 import { handleServerChanBotWebhookRequest, serverChanBotPlugin } from "./src/channel.js";
 import { setServerChanBotRuntime } from "./src/runtime.js";
 
