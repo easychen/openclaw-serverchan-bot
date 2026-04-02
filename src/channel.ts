@@ -1,11 +1,11 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type {
     ChannelAccountSnapshot,
-    ChannelPlugin,
     ChannelStatusIssue,
-    OpenClawConfig,
-} from "openclaw/plugin-sdk";
-import { DEFAULT_ACCOUNT_ID, buildChannelConfigSchema } from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/channel-contract";
+import type { ChannelPlugin, OpenClawConfig } from "openclaw/plugin-sdk/core";
+import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk/account-id";
+import { buildChannelConfigSchema } from "openclaw/plugin-sdk/channel-config-schema";
 import { ServerChanBotConfigSchema } from "./config-schema.js";
 import {
     serverChanBotGetMe,
